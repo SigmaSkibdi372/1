@@ -51,15 +51,19 @@ jobs:
           ${{ inputs.crd_code }}
           '@.Trim()
 
-          if ($crd.Length -gt 0) { $n = 1 }
-          else {
+          if ($crd.Length -gt 0) {
+            $n = 1
+          } else {
             $n = [int]"${{ inputs.rdp_count }}"
             if ($n -lt 1) { $n = 1 }
             if ($n -gt 10) { $n = 10 }
           }
 
           $inc = @()
-          for ($i=1; $i -le $n; $i++){ $inc += @{ id = $i } }
+          for ($i = 1; $i -le $n; $i++) {
+            $inc += @{ id = $i }
+          }
+
           $json = @{ include = $inc } | ConvertTo-Json -Compress
           "matrix=$json" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -79,15 +83,23 @@ jobs:
       RDP_PASS: Bullet@12345
 
     steps:
-      # ---------- CRD ----------
+      # ---------- SET CRD FLAG (FIXED) ----------
       - name: Set CRD flag
         run: |
           $crd = @'
           ${{ inputs.crd_code }}
           '@.Trim()
-          if ($crd.Length -gt 0) { "CRD_ENABLED=1" } else { "CRD_ENABLED=0" } |
-            Out-File -Append $env:GITHUB_ENV
 
+          if ($crd.Length -gt 0) {
+            $val = "CRD_ENABLED=1"
+          } else {
+            $val = "CRD_ENABLED=0"
+          }
+
+          $val | Out-File -Append $env:GITHUB_ENV
+          Write-Host $val
+
+      # ---------- INSTALL CRD ----------
       - name: Install Chrome Remote Desktop Host
         if: env.CRD_ENABLED == '1'
         run: |
@@ -100,6 +112,7 @@ jobs:
             Start-Process msiexec.exe -ArgumentList "/i","`"$msi`"","/quiet","/norestart" -Wait
           }
 
+      # ---------- RUN CRD ----------
       - name: Run Chrome Remote Desktop
         if: env.CRD_ENABLED == '1'
         run: |
@@ -108,7 +121,13 @@ jobs:
           '@.Trim()
           $pin = "${{ inputs.crd_pin }}"
 
+          if ($pin -notmatch '^\d{6,12}$') {
+            Write-Error "CRD PIN must be 6–12 digits"
+            exit 1
+          }
+
           $exe = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+
           if ($raw -match '--code\s*=\s*"?([^"\s]+)') {
             $code = $Matches[1]
           } elseif ($raw -match '^4\/') {
@@ -133,33 +152,41 @@ jobs:
           } else {
             $hn = "rdp"
           }
+
           "RDP_HOSTNAME=$hn" | Out-File -Append $env:GITHUB_ENV
 
-          function IntOr($v,$d){ if("$v" -match '^\d+$'){ [int]$v } else { $d } }
+          function IntOr($v,$d){
+            if("$v" -match '^\d+$'){ [int]$v } else { $d }
+          }
+
           $runtime = IntOr("${{ inputs.runtime_minutes }}",355)
           if ("${{ inputs.quick_test }}" -eq "true") { $runtime = 5 }
           if ($runtime -gt 360) { $runtime = 355 }
 
           "RUNTIME_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
+          Write-Host "Runtime: $runtime"
 
-      # ---------- RDP ----------
+      # ---------- ENABLE RDP ----------
       - name: Enable RDP user + firewall
         run: |
-          $u=$env:RDP_USER
-          $p=$env:RDP_PASS
+          $u = $env:RDP_USER
+          $p = $env:RDP_PASS
           $sec = ConvertTo-SecureString $p -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name $u -EA SilentlyContinue)) {
             New-LocalUser -Name $u -Password $sec -AccountNeverExpires
           } else {
             Set-LocalUser -Name $u -Password $sec
+            Enable-LocalUser -Name $u
           }
 
           Add-LocalGroupMember -Group "Administrators" -Member $u -EA SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -EA SilentlyContinue
 
-          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+          Set-ItemProperty `
+            "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
             -Name fDenyTSConnections -Value 0
+
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
       # ---------- PYTHON ----------
@@ -180,34 +207,19 @@ jobs:
       - name: Open RustDesk ports
         run: |
           for ($p=21115; $p -le 21119; $p++) {
-            netsh advfirewall firewall add rule name="RD-TCP-$p" `
-              dir=in action=allow protocol=TCP localport=$p
+            netsh advfirewall firewall add rule name="RD-TCP-$p" dir=in action=allow protocol=TCP localport=$p
           }
-          netsh advfirewall firewall add rule name="RD-UDP-21116" `
-            dir=in action=allow protocol=UDP localport=21116
+          netsh advfirewall firewall add rule name="RD-UDP-21116" dir=in action=allow protocol=UDP localport=21116
 
-      - name: Launch RustDesk + Screenshot
+      - name: Launch RustDesk
         run: |
           Start-Process "C:\Program Files\RustDesk\rustdesk.exe"
-          Start-Sleep 5
-
-          Add-Type -AssemblyName System.Windows.Forms
-          Add-Type -AssemblyName System.Drawing
-          $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height
-          $g=[System.Drawing.Graphics]::FromImage($bmp)
-          $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size)
-          $path="$env:TEMP\rd.png"
-          $bmp.Save($path)
-          $g.Dispose();$bmp.Dispose()
-
-          curl -F "file=@$path" https://store1.gofile.io/uploadFile
 
       # ---------- KEEP ALIVE ----------
       - name: Keep alive
         run: |
-          $end=(Get-Date).AddMinutes([int]$env:RUNTIME_MINUTES)
-          while((Get-Date) -lt $end){
+          $end = (Get-Date).AddMinutes([int]$env:RUNTIME_MINUTES)
+          while ((Get-Date) -lt $end) {
             Write-Host "Alive $(Get-Date)"
             Start-Sleep 60
           }
